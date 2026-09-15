@@ -253,7 +253,7 @@ function calculateConfidence(
   );
 }
 
-function buildProjection(games, schedules) {
+function buildProjection(games, schedules, defenseData) {
   const latest = games[games.length - 1];
 
   const position = latest.position;
@@ -330,6 +330,19 @@ function buildProjection(games, schedules) {
   targets = clamp(targets, 0, 14);
   carries = clamp(carries, 0, 25);
   passingTDs = clamp(passingTDs, 0, 3.5);
+
+  const matchup = upcomingOpponent(team, schedules);
+  const passMatchup = matchupMultiplier(matchup.opponent, "passing", defenseData);
+  const rushMatchup = matchupMultiplier(matchup.opponent, "rushing", defenseData);
+  const receiveMatchup = matchupMultiplier(matchup.opponent, "receiving", defenseData);
+
+  passingYards *= passMatchup;
+  passingTDs *= passMatchup;
+  rushingYards *= rushMatchup;
+  receivingYards *= receiveMatchup;
+  receptions *= receiveMatchup;
+  targets *= receiveMatchup;
+  carries *= rushMatchup;
 
   const tdProbability =
     touchdownProbability(games);
@@ -419,8 +432,6 @@ function buildProjection(games, schedules) {
       workload
     );
 
-  const matchup =
-    upcomingOpponent(team, schedules);
 
   const hotScore = Math.round(
     clamp(
@@ -491,6 +502,164 @@ function buildProjection(games, schedules) {
   };
 }
 
+
+function buildDefenseRatings(stats, schedules) {
+  const allowed = {};
+
+  const completedGames = schedules.filter((game) => {
+    if (Number(game.season) !== 2026) return false;
+
+    const awayScore = Number(game.away_score);
+    const homeScore = Number(game.home_score);
+
+    return Number.isFinite(awayScore) && Number.isFinite(homeScore);
+  });
+
+  completedGames.forEach((game) => {
+    const week = Number(game.week);
+    const home = game.home_team;
+    const away = game.away_team;
+
+    if (!home || !away) return;
+
+    if (!allowed[home]) {
+      allowed[home] = {
+        games: 0,
+        passing: 0,
+        rushing: 0,
+        receiving: 0,
+      };
+    }
+
+    if (!allowed[away]) {
+      allowed[away] = {
+        games: 0,
+        passing: 0,
+        rushing: 0,
+        receiving: 0,
+      };
+    }
+
+    const weekRows = stats.filter(
+      (row) =>
+        row.season_type === "REG" &&
+        Number(row.week) === week
+    );
+
+    const awayPlayers = weekRows.filter(
+      (row) =>
+        (row.recent_team || row.team) === away
+    );
+
+    const homePlayers = weekRows.filter(
+      (row) =>
+        (row.recent_team || row.team) === home
+    );
+
+    const teamTotals = (rows) => ({
+      passing: rows.reduce(
+        (sum, row) => sum + num(row.passing_yards),
+        0
+      ),
+      rushing: rows.reduce(
+        (sum, row) => sum + num(row.rushing_yards),
+        0
+      ),
+      receiving: rows.reduce(
+        (sum, row) => sum + num(row.receiving_yards),
+        0
+      ),
+    });
+
+    const awayTotals = teamTotals(awayPlayers);
+    const homeTotals = teamTotals(homePlayers);
+
+    allowed[home].games += 1;
+    allowed[home].passing += awayTotals.passing;
+    allowed[home].rushing += awayTotals.rushing;
+    allowed[home].receiving += awayTotals.receiving;
+
+    allowed[away].games += 1;
+    allowed[away].passing += homeTotals.passing;
+    allowed[away].rushing += homeTotals.rushing;
+    allowed[away].receiving += homeTotals.receiving;
+  });
+
+  const ratings = {};
+
+  Object.entries(allowed).forEach(([team, data]) => {
+    if (!data.games) return;
+
+    ratings[team] = {
+      passingAllowed: data.passing / data.games,
+      rushingAllowed: data.rushing / data.games,
+      receivingAllowed: data.receiving / data.games,
+    };
+  });
+
+  const teams = Object.values(ratings);
+
+  const leaguePassing =
+    teams.length
+      ? teams.reduce(
+          (sum, team) => sum + team.passingAllowed,
+          0
+        ) / teams.length
+      : 230;
+
+  const leagueRushing =
+    teams.length
+      ? teams.reduce(
+          (sum, team) => sum + team.rushingAllowed,
+          0
+        ) / teams.length
+      : 110;
+
+  const leagueReceiving =
+    teams.length
+      ? teams.reduce(
+          (sum, team) => sum + team.receivingAllowed,
+          0
+        ) / teams.length
+      : 230;
+
+  return {
+    ratings,
+    leaguePassing,
+    leagueRushing,
+    leagueReceiving,
+  };
+}
+
+function matchupMultiplier(opponent, type, defenseData) {
+  const defense = defenseData?.ratings?.[opponent];
+
+  if (!defense) return 1;
+
+  let ratio = 1;
+
+  if (type === "passing") {
+    ratio =
+      defense.passingAllowed /
+      defenseData.leaguePassing;
+  }
+
+  if (type === "rushing") {
+    ratio =
+      defense.rushingAllowed /
+      defenseData.leagueRushing;
+  }
+
+  if (type === "receiving") {
+    ratio =
+      defense.receivingAllowed /
+      defenseData.leagueReceiving;
+  }
+
+  // Keep early-season defensive samples from overreacting.
+  return clamp(1 + (ratio - 1) * 0.25, 0.90, 1.10);
+}
+
 async function buildHotList() {
   if (
     cache &&
@@ -539,6 +708,9 @@ async function buildHotList() {
     skip_empty_lines: true,
   });
 
+  const defenseData =
+    buildDefenseRatings(stats, schedules);
+
   const players = stats.filter(
     (row) =>
       row.season_type === "REG" &&
@@ -569,10 +741,11 @@ async function buildHotList() {
         );
 
         return buildProjection(
-          games,
-          schedules
-        );
-      })
+        games,
+        schedules,
+        defenseData
+      );
+      })
       .filter(
         (player) =>
           player.projections
