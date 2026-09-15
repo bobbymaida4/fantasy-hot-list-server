@@ -46,10 +46,78 @@ function recentAverage(games, field, count = 3) {
 }
 
 function blendedProjection(games, field) {
-  const season = average(games, field);
-  const recent = recentAverage(games, field, 3);
+  if (!games || games.length === 0) return 0;
 
-  return season * 0.55 + recent * 0.45;
+  const latest = games[games.length - 1];
+  const position = latest.position || "";
+
+  // Early-season positional priors.
+  // These keep one unusual game from becoming the next-game projection.
+  const priors = {
+    QB: {
+      passing_yards: 235,
+      passing_tds: 1.5,
+      rushing_yards: 18,
+      receiving_yards: 0,
+      receptions: 0,
+      targets: 0,
+      carries: 4,
+    },
+    RB: {
+      passing_yards: 0,
+      passing_tds: 0,
+      rushing_yards: 58,
+      receiving_yards: 24,
+      receptions: 2.5,
+      targets: 3.5,
+      carries: 14,
+    },
+    WR: {
+      passing_yards: 0,
+      passing_tds: 0,
+      rushing_yards: 3,
+      receiving_yards: 55,
+      receptions: 4,
+      targets: 6.5,
+      carries: 0.5,
+    },
+    TE: {
+      passing_yards: 0,
+      passing_tds: 0,
+      rushing_yards: 0,
+      receiving_yards: 42,
+      receptions: 3.5,
+      targets: 5,
+      carries: 0,
+    },
+  };
+
+  const prior =
+    priors[position] && priors[position][field] !== undefined
+      ? priors[position][field]
+      : 0;
+
+  const season = average(games, field);
+  const recent = recentAverage(games, field, 3);
+
+  // The more 2026 games we have, the more we trust the player's own data.
+  const sampleWeight =
+    games.length === 1 ? 0.45 :
+    games.length === 2 ? 0.60 :
+    games.length === 3 ? 0.72 :
+    games.length === 4 ? 0.80 :
+    0.88;
+
+  // Recent form matters, but it cannot completely replace the larger sample.
+  const playerEstimate =
+    games.length >= 3
+      ? season * 0.65 + recent * 0.35
+      : season;
+
+  return (
+    playerEstimate * sampleWeight +
+    prior * (1 - sampleWeight)
+  );
 }
 
 function standardDeviation(games, field) {
@@ -70,58 +138,54 @@ function standardDeviation(games, field) {
 }
 
 function upcomingOpponent(team, schedules) {
-  const now = new Date();
+  const now = new Date();
 
-  const games = schedules
-    .filter((game) => {
-      if (Number(game.season) !== 2026) return false;
+  const games = schedules
+    .filter((game) => {
+      if (Number(game.season) !== 2026) return false;
 
-      const teamPlaying =
-        game.home_team === team ||
-        game.away_team === team;
+      const teamPlaying =
+        game.home_team === team ||
+        game.away_team === team;
 
-      if (!teamPlaying) return false;
+      if (!teamPlaying) return false;
 
-      const dateString =
-        game.gameday ||
-        game.game_date ||
-        game.date;
+      // nflverse schedules provide the actual kickoff timestamp here.
+      const kickoffString =
+        game.gameday && game.gametime
+          ? `${game.gameday}T${game.gametime}`
+          : null;
 
-      if (!dateString) return false;
+      if (!kickoffString) return false;
 
-      const date = new Date(`${dateString}T23:59:59`);
+      const kickoff = new Date(kickoffString);
 
-      return date >= now;
-    })
-    .sort((a, b) => {
-      const dateA = new Date(
-        a.gameday || a.game_date || a.date
-      );
+      // Reject bad dates and every game that has already started.
+      if (Number.isNaN(kickoff.getTime())) return false;
+      return kickoff.getTime() > now.getTime();
+    })
+    .sort((a, b) => {
+      const dateA = new Date(`${a.gameday}T${a.gametime}`);
+      const dateB = new Date(`${b.gameday}T${b.gametime}`);
+      return dateA - dateB;
+    });
 
-      const dateB = new Date(
-        b.gameday || b.game_date || b.date
-      );
+  const game = games[0];
 
-      return dateA - dateB;
-    });
+  if (!game) {
+    return {
+      opponent: "TBD",
+      week: null,
+    };
+  }
 
-  const game = games[0];
-
-  if (!game) {
-    return {
-      opponent: "TBD",
-      week: null,
-    };
-  }
-
-  return {
-    opponent:
-      game.home_team === team
-        ? game.away_team
-        : game.home_team,
-
-    week: Number(game.week),
-  };
+  return {
+    opponent:
+      game.home_team === team
+        ? game.away_team
+        : game.home_team,
+    week: Number(game.week),
+  };
 }
 
 function touchdownProbability(games) {
